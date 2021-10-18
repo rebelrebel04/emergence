@@ -24,6 +24,11 @@ fit.ranger <-
   Glass %>%
   ranger(Type ~ ., data = ., num.trees = 1000, seed = 1234, importance = "impurity")
 
+glimpse(diamonds)
+fit.ranger <-
+  diamonds %>% 
+  ranger(price ~ ., data = ., num.trees = 250, seed = 1234, importance = "impurity")
+
 # glimpse(iris)
 # fit.ranger <-
 #   iris %>% 
@@ -32,11 +37,6 @@ fit.ranger <-
 fit.ranger
 prop.table(fit.ranger$confusion.matrix)
 sort(fit.ranger$variable.importance)
-
-# forest <-
-#   tibble(varID = fit.ranger$forest$split.varIDs, tree = 1:fit.ranger$forest$num.trees) %>%
-#   bind_cols(tibble(values = fit.ranger$forest$split.values)) %>%
-#   unnest(c(varID, values))
 
 get_pairs <- function(ti, side) {
   ti %>%
@@ -71,4 +71,13 @@ all_pairs %>%
   scale_fill_viridis_c("n pairs", option = "B") +
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
 
+
+
+forest <-
+  tibble(varID = fit.ranger$forest$split.varIDs, tree = 1:fit.ranger$forest$num.trees) %>%
+  bind_cols(tibble(values = fit.ranger$forest$split.values)) %>%
+  unnest(c(varID, values))
+
+treeInfo(fit.ranger, 1) %>% 
+  View()
 
