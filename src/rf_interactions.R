@@ -104,20 +104,75 @@ fit.ranger <-
 # pred.case <- predict(fit.ranger, test[nrow(test), ], predict.all = TRUE, seed = 1234)
 
 
-plot_forests <- function(data, fit, n_cases = 5, seed = 1234) {
-  
-  # TODO: rework case sampling to index actual case numbers & label them in plot for correct reference
-  # overlay predicted, observed, reldiff on each tile
+# Ridge plot of distribution of forest's predictions for individual cases
+# White dot is mean of forest predictions, blue dot is actual value
+plot_forest_ridges <- function(data, fit, n_cases = 5, seed = 1234) {
   
   set.seed(seed)
-  pred.cases <- 
+  samp <- 
     data %>% 
-    slice_sample(n = n_cases) %>% 
+    slice_sample(n = n_cases)
+  
+  pred.cases <- 
+    samp %>% 
     predict(fit, data = ., predict.all = TRUE)
+  
+  pred.means <- 
+    pred.cases$predictions %>% 
+    t() %>% 
+    as_tibble() %>% 
+    summarize(across(everything(), mean)) %>% 
+    pivot_longer(everything())
+  
+  obs.means <- 
+    samp %>% 
+    mutate(name = glue::glue("V{row_number()}"))
   
   pred.cases$predictions %>% 
     t() %>% 
     as_tibble() %>% 
+    pivot_longer(everything()) %>% 
+    ggplot(aes(x = value, y = reorder(name, value), fill = name)) +
+    ggridges::geom_density_ridges(alpha = .6) +
+    geom_point(data = pred.means, color = "blue", size = 2) +
+    geom_point(data = obs.means, aes(x = price, y = name), color = "white", size = 2) +    
+    scale_fill_viridis_d() +
+    ggdark::dark_theme_bw()
+    #ggridges::theme_ridges()
+  
+}
+plot_forest_ridges(test, fit.ranger, 25)
+
+
+
+plot_forests <- function(data, fit, n_cases = 5, seed = 1234) {
+  
+  set.seed(seed)
+  cases <- sample(1:nrow(data), n_cases)
+  samp <- data[cases, ]
+  
+  pred.cases <- 
+    samp %>% 
+    predict(fit, data = ., predict.all = TRUE)
+  
+  pred.means <- 
+    pred.cases$predictions %>% 
+    t() %>% 
+    as_tibble() %>% 
+    summarize(across(everything(), mean)) %>% 
+    pivot_longer(everything()) %>% 
+    mutate(case = paste0("case_", cases)) %>% 
+    bind_cols(select(samp, price)) %>% 
+    mutate(
+      absdiff = value - price,
+      reldiff = absdiff / price,
+      label = glue::glue("Actual: {scales::dollar(price)}\nPred: {scales::dollar(value)}\n%Diff: {scales::percent(reldiff, accuracy = .1)}")
+    )
+  
+  pred.cases$predictions %>% 
+    t() %>% 
+    as_tibble() %>% 
+    set_names(paste0("case_", cases)) %>% 
     bind_cols(
       expand_grid(
         x = 1:ceiling(sqrt(fit$num.trees)),
@@ -125,34 +180,16 @@ plot_forests <- function(data, fit, n_cases = 5, seed = 1234) {
       )
     ) %>% 
     pivot_longer(!c(x, y), names_to = "case", values_to = "prediction") %>% 
-    mutate(case = gsub("V", "case_", case, fixed = TRUE)) %>% 
     ggplot(aes(x = x, y = y, fill = prediction)) +
     #geom_hex(stat = "identity") +
     geom_raster() +
+    geom_label(data = pred.means, aes(label = label), x = sqrt(fit$num.trees)/2, y = sqrt(fit$num.trees)/2, alpha = .5, inherit.aes = FALSE) +
     scale_fill_viridis_c("Prediction", option = "B") +
     facet_wrap(~ case, scales = "fixed")
   
 }
 
 plot_forests(test, fit.ranger, 25, seed = 1234)
-
-
-# set.seed(1234)
-# pred.cases <- 
-#   test %>% 
-#   slice_sample(n = 5) %>% 
-#   predict(fit.ranger, data = ., predict.all = TRUE)
-# 
-# pred.cases$predictions %>% 
-#   t() %>% 
-#   as_tibble() %>% 
-#   bind_cols(
-#     expand_grid(
-#       x = 1:ceiling(sqrt(fit$num.trees)),
-#       y = 1:ceiling(sqrt(fit$num.trees))
-#     )
-#   )
-
 
 
 # So to reduce trees to 2 dimensions, need to figure out how to
@@ -269,3 +306,49 @@ pca$scores[, 1:2] %>%
   scale_color_viridis_c("Feature", option = "C", begin = 0) +
   facet_wrap(~ name, scales = "fixed") +
   ggdark::dark_theme_bw()
+
+
+
+
+# SOM ####
+library(kohonen)
+data_train_matrix <-
+  train %>% 
+  select(where(is.numeric)) %>% 
+  mutate(across(everything(), scale)) %>% 
+  as.matrix()
+
+# Create the SOM Grid - you generally have to specify the size of the 
+# training grid prior to training the SOM. Hexagonal and Circular 
+# topologies are possible
+som_grid <- somgrid(xdim = 20, ydim=20, topo="hexagonal")
+# Finally, train the SOM, options for the number of iterations,
+# the learning rates, and the neighbourhood are available
+som_model <- 
+  som(
+    data_train_matrix, 
+    grid=som_grid, 
+    rlen=500, 
+    alpha=c(0.05,0.01), 
+    keep.data = TRUE 
+  )
+
+#Training progress for SOM
+plot(som_model, type="changes")
+
+#Node count plot
+plot(som_model, type="count", main="Node Counts")
+
+# U-matrix visualisation
+plot(som_model, type="dist.neighbours", main = "SOM neighbour distances")
+
+# Weight Vector View
+plot(som_model, type="codes")
+
+# Kohonen Heatmap creation
+plot(som_model, type = "property", property = getCodes(som_model)[,4], main=colnames(getCodes(som_model))[4], palette.name=terrain.colors) # coolBlueHotRed)
+
+# Unscaled Heatmaps
+#define the variable to plot 
+var_unscaled <- aggregate(as.numeric(data_train[,var]), by=list(som_model$unit.classif), FUN=mean, simplify=TRUE)[,2] 
+plot(som_model, type = "property", property=var_unscaled, main=colnames(getCodes(som_model))[var], palette.name=coolBlueHotRed)
