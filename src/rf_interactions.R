@@ -104,6 +104,45 @@ fit.ranger <-
 # pred.case <- predict(fit.ranger, test[nrow(test), ], predict.all = TRUE, seed = 1234)
 
 
+# CORR ####
+# Compare y ~ x correlations to varimp; differences imply
+# nonlinear associations at expense of interpretability
+
+# > RF VarImp
+ranger::importance(fit.ranger) %>% 
+  as_tibble(rownames = "feature") %>% 
+  ggplot(aes(x = reorder(feature, value), y = value)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  ggdark::dark_theme_bw()
+
+# > Bivariate Zero-Order Correlations
+train %>% 
+  select(where(is.numeric)) %>% 
+  corrr::correlate() %>% 
+  filter(term != "price") %>%   
+  select(feature = term, value = price) %>% 
+  ggplot(aes(x = reorder(feature, value), y = value)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  ggdark::dark_theme_bw()
+
+# > MR (main effects model)
+fit.lm <- 
+  train %>% 
+  mutate(across(where(is.numeric), scale)) %>% 
+  lm(price ~ ., data = .)
+summary(fit.lm)
+coefficients(fit.lm) %>% 
+  as_tibble(rownames = "feature") %>% 
+  ggplot(aes(x = reorder(feature, value), y = value)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  ggdark::dark_theme_bw()
+
+
+
+
 # Ridge plot of distribution of forest's predictions for individual cases
 # White dot is mean of forest predictions, blue dot is actual value
 plot_forest_ridges <- function(data, fit, n_cases = 5, seed = 1234) {
