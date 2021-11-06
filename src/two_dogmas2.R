@@ -6,9 +6,11 @@ requireNamespace("lme4")
 requireNamespace("xgboost")
 
 # DATA SIM ####
-n_obs <- 1000
+n_obs <- 10000
 
 set.seed(1234)
+
+# Linear model
 d.1 <- 
   tibble(
     A = rnorm(n_obs, 0, 1),
@@ -17,8 +19,49 @@ d.1 <-
     # D = rnorm(n_obs),
     epsilon = rnorm(n_obs),
     y = 1*A + 3*B + 6*epsilon
+    # y = 1*A + 3*B + 1*A*B + 5*epsilon    
     # y = 1*A + 3*B^2 + 3*epsilon
   )
+
+# rf.unsup <- randomForest::randomForest(x = d.1[, c("A", "B")])
+# rf.unsup
+# summary(rf.unsup)
+# str(rf.unsup$proximity)
+# randomForest::MDSplot(rf.unsup, )
+
+learner <- function(A, B) {
+  # ifelse(A > B, A, B)
+  ifelse(
+    A * runif(1) > B,
+    ifelse(
+      B > 0,
+      B,
+      A
+    ),
+    sqrt(A^2 + B^2)
+  )
+}
+
+set.seed(1234)
+n_ensembles <- 250
+res <- vector(mode = "numeric", length = nrow(d.1))
+for (i in 1:nrow(d.1)) {
+  row <- vector(mode = "numeric", length = n_ensembles)  
+  for (j in 1:n_ensembles) {
+    row[j] <- learner(d.1$A[i], d.1$B[i])
+  }
+  res[i] <- mean(row)
+}
+res
+hist(res)
+
+d.1 <- 
+  d.1 %>% 
+  mutate(
+    y = res + epsilon
+  )
+
+
 glimpse(d.1)
 summary(d.1$y)
 d.1 %>% 
@@ -29,9 +72,28 @@ d.1 %>%
 d.1 %>% 
   pivot_longer(!y) %>% 
   ggplot(aes(x = value, y = y)) +
-  geom_point() +
+  geom_point(alpha = .1) +
   geom_smooth(method = "lm") +
   facet_wrap(~ name)
+
+
+# How does y~A relationship change by quartiles of B?
+d.1 %>% 
+  mutate(B = cut(B, breaks = quantile(B), labels = FALSE)) %>% 
+  #pivot_longer(!c(y, B))
+  ggplot(aes(x = A, y = y)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  facet_wrap(~ B)
+
+# How does y~B relationship change by quartiles of A?
+d.1 %>% 
+  mutate(A = cut(A, breaks = quantile(A), labels = FALSE)) %>% 
+  #pivot_longer(!c(y, B))
+  ggplot(aes(x = B, y = y)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  facet_wrap(~ A)
 
 
 # DATA SPLIT ####
@@ -89,7 +151,7 @@ wfs
 # TUNE ####
 library(doMC)
 parallel::detectCores(logical = FALSE); parallel::detectCores(logical = TRUE)
-registerDoMC(cores = 12)
+registerDoMC(cores = parallel::detectCores(logical = TRUE) - 2)
 # registerDoSEQ() #reset to serial processing
 
 race_ctrl <-
@@ -171,13 +233,14 @@ race_results.1 %>%
     metric = c("rsq", "rmse"),       
     select_best = TRUE    
   ) +
-  ggrepel::geom_label_repel(aes(label = wflow_id), size = 3, fill = "white") +
+  ggrepel::geom_label_repel(aes(label = wflow_id), size = 3, fill = "white", alpha = .5) +
   #geom_label(aes(label = wflow_id), size = 2) +
-  scale_color_viridis_d(end = .6, option = "C") +
-  ggtitle("RMSE & RSq", subtitle = "95% CIs; Best Fit of each Model") +
-  theme_bw() +
+  scale_color_viridis_d(end = .6, option = "C") +  
+  ggtitle("RMSE & RSq", subtitle = "95% CIs; Best fit of each model on training data") +
+  theme_gray() +
+  scale_x_continuous(breaks = 1:10) +
   theme(legend.position = "none")
-
+ggsave("./src/png/rmse_rsq_autoplot.png", width = 6, height = 3)
 
 
 # Obs/pred plots for best configs
@@ -223,12 +286,13 @@ best_preds %>%
   # filter(across(c(sales.newsales.MA7, .pred), ~ .x > 0)) %>% 
   ggplot(aes(x = y, y = .pred)) +  
   geom_abline(lty = 2, alpha = 1, color = "black") +   
-  geom_point(alpha = .25, color = "blue") +
+  geom_point(alpha = .1, color = "blue") +
+  geom_smooth() +
   coord_obs_pred() +
   scale_color_viridis_d() +
   facet_wrap(~ wflow_id) +
   ggtitle("Obs vs. Predicted", subtitle = "Best fit of each model on training data") +
-  theme_bw()
+  theme_gray()
 
 # # Resid histograms by model -- choose transformed or raw units
 # best_preds %>% 
@@ -277,142 +341,8 @@ best_preds %>%
 
 
 
-
-# OPTIMIZE ####
-# Select subset of most promising models for tweaking & finalization
-
-# Look at obs/pred plot outliers: anything special about those days that could indicate additional features?
-wf_nm <- "basic_Cubist"
-best_results <- 
-  race_results.1 %>% 
-  extract_workflow_set_result(wf_nm) %>% 
-  select_best(metric = "rmse")
-best_results
-
-best_results_fit <- 
-  race_results.1 %>% 
-  extract_workflow(wf_nm) %>% 
-  finalize_workflow(best_results) %>% 
-  #last_fit(split = aoa_split)  
-  fit(aoa_train)
-
-resids <- 
-  predict(best_results_fit, new_data = aoa_train) %>% 
-  mutate(
-    dim_date = aoa_train$dim_date,
-    .obs = aoa_train$sales.newsales.MA7,
-    across(c(.pred, .obs), ~ InvBoxCox(.x, bc_lambda), .names = "{.col}_raw"),
-    delta = .pred - .obs,
-    delta_raw = .pred_raw - .obs_raw,
-    reldiff_raw = scales::percent(delta_raw / .obs_raw, accuracy = 1)
-  ) %>% 
-  select(dim_date, everything()) %>% 
-  arrange(desc(abs(delta_raw)))
-
-# What predicts the (abs) residuals? Fit a lm and look at coeffs?
-all.resid <- 
-  aoa_train %>% 
-  dplyr::left_join(
-    resids %>% 
-      select(dim_date, delta)
-  ) %>% 
-  mutate(delta = abs(delta))
-
-resid_rec <- 
-  recipe(delta ~ ., data = all.resid) %>% 
-  # step_nzv(all_numeric_predictors()) %>%   
-  step_rm(sales.newsales.MA7) %>% 
-  step_holiday(dim_date) %>%
-  step_date(dim_date, features = c("dow", "month")) %>%   
-  # remove date from the list of predictors  
-  update_role(dim_date, new_role = "id") %>%   
-  step_dummy(all_nominal_predictors()) %>% 
-  step_naomit(all_predictors())
-resid_fit <- 
-  workflow() %>%
-  add_recipe(resid_rec) %>%
-  add_model(lm_spec) %>%
-  fit(all.resid)
-tidy(resid_fit) %>% 
-  ggplot(aes(x = reorder(term, p.value), y = p.value)) +
-  geom_point() +
-  geom_hline(yintercept = 0.05) +
-  coord_flip() +
-  ggdark::dark_theme_bw()
-
-# Scatterplot each of these sig predictors against the outcome?
-resid_preds <- 
-  tidy(resid_fit) %>% 
-  arrange(p.value) %>% 
-  filter(p.value < .05) %>% 
-  pull(p.value, term)
-resid_preds
-
-prep(resid_rec, all.resid) %>% 
-  bake(new_data = all.resid) %>% 
-  select(dim_date, !!! names(resid_preds)) %>% 
-  dplyr::left_join(
-    all.resid %>% select(dim_date, sales.newsales.MA7)
-  ) %>% 
-  pivot_longer(!c(dim_date, sales.newsales.MA7)) %>% 
-  ggplot(aes(x = value, y = sales.newsales.MA7)) +
-  geom_point(color = "green", alpha = .3) +
-  geom_smooth(method = "loess", span = .5, se = FALSE, color = "white") +
-  facet_wrap(~ name, scales = "free") +
-  ggdark::dark_theme_bw()
-
-# maybe... combine NYDay and ChristmasDay into the same feature?
-#          or broaden out "holiday" dates to a couple days pre/post?
-# for nonlinear relationships with residuals, maybe a spline transform would
-# help improve the feature?
-
-
-
-# best_results_fit %>% 
-#   #collect_metrics()
-#   collect_predictions()
-
-
-
-# Look at fit for the best config of a specific workflow
-wf_nm <- "basic_lm"
-race_results.1 %>% 
-  pull_workflow_set_result(wf_nm) %>% 
-  autoplot() +
-  geom_line() +
-  ggdark::dark_theme_bw()
-
-race_results.1 %>% 
-  pull_workflow_set_result(wf_nm) %>% 
-  show_best("rmse")
-
-race_results.1 %>% 
-  pull_workflow_set_result(wf_nm) %>% 
-  show_best("rmse")
-
-res <-
-  workflow() %>%
-  add_recipe(basic_rec) %>%
-  add_model(lm_spec) %>%
-  fit(aoa_train)
-tidy(res) %>% 
-  ggplot(aes(x = reorder(term, p.value), y = p.value)) +
-  geom_point() +
-  geom_hline(yintercept = 0.05) +
-  coord_flip() +
-  ggdark::dark_theme_bw()
-
-
-
-# BAKE-OFF ####
-# Compare performance of top models from race tuning on holdout data
-# https://www.tmwr.org/workflow-sets.html#finalizing-a-model
-
-# > The first step is to pick a workflow to finalize. Since the boosted tree model
-# > worked well, we’ll extract that from the set, update the parameters with the
-# > numerically best settings, and fit to the training set:
-
-best_algos <- c("basic_boosting", "basic_Cubist", "normalized_neural_network", "basic_MARS", "basic_lm")
+# HOLDOUT DATA ####
+best_algos <- wfs$wflow_id
 best_algos_train_results <- 
   best_algos %>% 
   map(
@@ -432,105 +362,90 @@ best_algos_test_results <-
       # Use best hyperparameters from tuning & refit on entire training set
       finalize_workflow(.x) %>% 
       # Fit to holdout data
-      last_fit(split = aoa_split)
+      last_fit(split = splits)
   )
 best_algos_test_results
 
 # These are the performance metrics for holdout data alone
 best_algos_test_results %>% map(collect_metrics)
-best_algos_test_results %>% 
-  map_dfr(collect_metrics, .id = "algo") %>% 
-  ggplot(aes(x = algo, y = .estimate)) +
-  #geom_bar(stat = "identity") +
-  geom_point(alpha = 1, color = "lightgreen") +
-  ggrepel::geom_label_repel(aes(label = round(.estimate, 2)), size = 3, alpha = .8, fill = "black", color = "white") +
-  coord_flip() +
-  facet_grid(~ .metric, scales = "free_x") +
-  ggtitle("HOLDOUT DATA: Performance Metrics", subtitle = "Best Fit of each Model") +  
-  ggdark::dark_theme_bw()
+# best_algos_test_results %>% 
+#   map_dfr(collect_metrics, .id = "algo") %>% 
+#   ggplot(aes(x = algo, y = .estimate)) +
+#   #geom_bar(stat = "identity") +
+#   geom_point(alpha = 1, color = "lightgreen") +
+#   ggrepel::geom_label_repel(aes(label = round(.estimate, 2)), size = 3, alpha = .8, fill = "black", color = "white") +
+#   coord_flip() +
+#   facet_grid(~ .metric, scales = "free_x") +
+#   ggtitle("HOLDOUT DATA: Performance Metrics", subtitle = "Best Fit of each Model") +
+#   theme_gray()
+
+mets_test <- 
+  best_algos_test_results %>% 
+  map_dfr(collect_metrics, .id = "wflow_id") %>% 
+  select(wflow_id, .metric, .estimate) %>% 
+  pivot_wider(wflow_id, names_from = .metric, values_from = .estimate) %>% 
+  mutate(split = "test")
+
+mets_train <- 
+  race_results.1 %>% 
+  rank_results(select_best = TRUE) %>% 
+  select(wflow_id, .metric, mean) %>% 
+  pivot_wider(names_from = .metric, values_from = mean) %>% 
+  mutate(split = "train")
+
+# bind_rows(mets_train, mets_test) %>% 
+#   pivot_longer(!c(wflow_id, split), names_to = "metric") %>% 
+#   pivot_wider(c(wflow_id, metric), names_from = split, values_from = value) %>% 
+#   ggplot(aes(x = wflow_id, ymin = test, ymax = train, color = wflow_id)) +
+#   geom_errorbar() +
+#   facet_wrap(~ metric, scales = "free_y") +
+#   theme_gray() 
+  
+bind_rows(mets_train, mets_test) %>% 
+  pivot_longer(!c(wflow_id, split), names_to = "metric") %>%
+  ggplot(aes(x = wflow_id, y = value, color = wflow_id, shape = split)) +
+  geom_point(size = 3) +
+  scale_color_viridis_d(end = .6, option = "C") +  
+  facet_wrap(~ metric, scales = "free_y") +  
+  ggtitle("Train vs. Test RMSE & RSq", subtitle = "Best fit of each model") +
+  theme_gray()
+  # theme(legend.position = "none")
+ggsave("./src/png/rmse_rsq_test-vs-train.png", width = 6, height = 3)
+
+  
+
+
+
 
 best_algos_test_results %>% 
   map_dfr(collect_predictions, .id = "algo") %>% 
-  ggplot(aes(x = sales.newsales.MA7, y = .pred)) +  
+  ggplot(aes(x = y, y = .pred)) +  
   geom_abline(lty = 2, alpha = .5) +   
-  geom_point(alpha = .25, color = "lightgreen") +
+  geom_point(alpha = .25, color = "blue") +
+  geom_smooth() +
   coord_obs_pred() +
   scale_color_viridis_d() +
   facet_wrap(~ algo) +
-  ggtitle("HOLDOUT DATA: Obs vs. Predicted", subtitle = "Best Fit of each Model") +
-  ggdark::dark_theme_bw()
+  ggtitle("HOLDOUT DATA: Obs vs. Predicted", subtitle = "Best Fit of each Model")
 
-best_algos_test_results %>% 
-  map_dfr(collect_predictions, .id = "algo") %>% 
-  select(algo, .row, sales.newsales.MA7, .pred) %>%   
-  pivot_longer(!c(algo, .row)) %>% 
-  ggplot(aes(x = .row, y = value, color = name, size = name, alpha = name)) +
-  geom_line() +
-  #scale_color_viridis_d(begin = 0.5, option = "C") +  
-  scale_color_manual(values = c("green", "white")) +
-  scale_size_manual(values = c(.5, 1.5)) +
-  scale_alpha_manual(values = c(.8, .3)) +
-  facet_wrap(~ algo) +  
-  ggtitle("HOLDOUT DATA: Observed vs. Predicted Timeseries", subtitle = "Best Fit of each Model") +
-  ggdark::dark_theme_bw()
-
-
-
-# Just for fun: check out demand score cross-correlations with predictors
-# tmp <- 
-#   all.4 %>% 
-#   dplyr::left_join(
-#     tibble(
-#       dim_date = aoa_split$data$dim_date,
-#       demand_score = 
-#         predict(selected_model, aoa_split$data) %>% 
-#         InvBoxCox(lambda = bc_lambda) %>% 
-#         pull(.pred)
-#     ),
-#     by = "dim_date"
-#   ) %>% 
-#   filter(!is.na(demand_score))  
-# 
-# tmp %>% 
-#   select(demand_score, starts_with("phd.")) %>% 
-#   rename_with(~ gsub("phd.", "", .x, fixed = TRUE)) %>% 
-#   #select(-input$index) %>% 
-#   map_dfr(~ broom::tidy(ccf(.x, tmp$demand_score, lag.max = 14, plot = FALSE)), .id = ".id") %>% 
-#   filter(lag <= 0) %>% 
-#   ggplot(aes(x = lag, y = acf, fill = factor(acf < 0))) +
-#   geom_bar(stat = "identity", alpha = .7) +
-#   geom_text(aes(label = ifelse(abs(acf) >= .3, round(acf, 2), "")), size = 3, color = "white", vjust = -1) +
-#   scale_x_continuous(breaks = -100:100) +
-#   scale_y_continuous("ccf", limits = c(NA, 1.5)) +
-#   scale_fill_manual(values = c("green", "red")) +
-#   facet_grid(.id ~ .) +
-#   ggdark::dark_theme_bw() +
-#   theme(legend.position = "none")  
+# best_algos_test_results %>% 
+#   map_dfr(collect_predictions, .id = "algo") %>% 
+#   select(algo, .row, y, .pred) %>%   
+#   pivot_longer(!c(algo, .row)) %>% 
+#   ggplot(aes(x = .row, y = value, color = name, size = name, alpha = name)) +
+#   geom_line() +
+#   #scale_color_viridis_d(begin = 0.5, option = "C") +  
+#   scale_color_manual(values = c("green", "white")) +
+#   scale_size_manual(values = c(.5, 1.5)) +
+#   scale_alpha_manual(values = c(.8, .3)) +
+#   facet_wrap(~ algo) +  
+#   ggtitle("HOLDOUT DATA: Observed vs. Predicted Timeseries", subtitle = "Best Fit of each Model")
 
 
 
 
 
+# COEFFICIENTS ####
+# How well does each model recover the actual coefficients of the equation?
 
 
-# SERIALIZE MODEL ARTIFACT ####
-selected_model <- best_algos_test_results$basic_Cubist$.workflow[[1]]
-selected_model
-predict(selected_model, aoa_test) %>% 
-  # Need to InvBoxCox the prediction to get back to raw outcome units  
-  InvBoxCox(lambda = bc_lambda)
-
-freeze(selected_model)
-freeze(bc_lambda)
-
-# For production, need to save these artifacts in a versioned location
-# so they are accessible via GL -- ultimately a proper model registry would be the
-# right solution here, rather than just saving RDS files to GL
-saveRDS(selected_model, GLOBALS$RDS_MODEL)
-saveRDS(bc_lambda, GLOBALS$RDS_BCLAMBDA)
-
-
-
-
-
-# TEST DATA ####
