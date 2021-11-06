@@ -703,6 +703,13 @@
       "Repository": "CRAN",
       "Hash": "98138e0994d41508c7a6b84a0600cfcb"
     },
+    "kernlab": {
+      "Package": "kernlab",
+      "Version": "0.9-29",
+      "Source": "Repository",
+      "Repository": "CRAN",
+      "Hash": "46b2f61dadae64579e4cbe8af3c088d6"
+    },
     "knitr": {
       "Package": "knitr",
       "Version": "1.36",

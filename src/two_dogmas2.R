@@ -1,16 +1,20 @@
 library(tidyverse)
+library(glue)
 library(tidymodels)
 library(finetune)
 library(corrr)
+library(patchwork)
 requireNamespace("lme4")
 requireNamespace("xgboost")
+requireNamespace("nnet")
+requireNamespace("kernlab")
 
 # DATA SIM ####
-n_obs <- 10000
+n_obs <- 1000
 
+
+# > Linear-mechanism Data ####
 set.seed(1234)
-
-# Linear model
 d.1 <- 
   tibble(
     A = rnorm(n_obs, 0, 1),
@@ -22,14 +26,17 @@ d.1 <-
     # y = 1*A + 3*B + 1*A*B + 5*epsilon    
     # y = 1*A + 3*B^2 + 3*epsilon
   )
+data_type <- "linear mechanism"
 
+
+# > Ensemble-mechanism Data ####
 # rf.unsup <- randomForest::randomForest(x = d.1[, c("A", "B")])
 # rf.unsup
 # summary(rf.unsup)
 # str(rf.unsup$proximity)
 # randomForest::MDSplot(rf.unsup, )
-
-learner <- function(A, B) {
+set.seed(1234)
+simple_tree <- function(A, B) {
   # ifelse(A > B, A, B)
   ifelse(
     A * runif(1) > B,
@@ -48,11 +55,11 @@ res <- vector(mode = "numeric", length = nrow(d.1))
 for (i in 1:nrow(d.1)) {
   row <- vector(mode = "numeric", length = n_ensembles)  
   for (j in 1:n_ensembles) {
-    row[j] <- learner(d.1$A[i], d.1$B[i])
+    row[j] <- simple_tree(d.1$A[i], d.1$B[i])
   }
   res[i] <- mean(row)
 }
-res
+summary(res)
 hist(res)
 
 d.1 <- 
@@ -60,8 +67,10 @@ d.1 <-
   mutate(
     y = res + epsilon
   )
+data_type <- "ensemble mechanism"
 
 
+# > Inspect data ####
 glimpse(d.1)
 summary(d.1$y)
 d.1 %>% 
@@ -126,12 +135,34 @@ rand_forest_ranger_spec <-
   set_engine('ranger') %>%
   set_mode('regression')
 
+mlp_nnet_spec <-
+  mlp(hidden_units = tune(), penalty = tune(), epochs = tune()) %>%
+  set_engine('nnet') %>%
+  set_mode('regression')
+
+svm_rbf_kernlab_spec <-
+  svm_rbf(cost = tune(), rbf_sigma = tune(), margin = tune()) %>%
+  set_engine('kernlab') %>%
+  set_mode('regression')
+
+
+
 
 # WORKFLOWS ####
 wfs <- 
   workflow_set(
-    preproc = list(basic = basic_rec),
-    models = list(lm = linear_reg_lm_spec, rf = rand_forest_ranger_spec, xgb = boost_tree_xgboost_spec)
+    preproc = 
+      list(
+        basic = basic_rec
+      ),
+    models = 
+      list(
+        lm = linear_reg_lm_spec, 
+        rf = rand_forest_ranger_spec, 
+        xgb = boost_tree_xgboost_spec,
+        mlp = mlp_nnet_spec,
+        svm = svm_rbf_kernlab_spec
+      )
   )
 wfs
 
@@ -169,7 +200,7 @@ full_results_time <-
         "tune_race_anova",
         seed = 1503,
         resamples = folds,
-        grid = 20,
+        grid = 10,
         control = race_ctrl,
         verbose = TRUE
       )
@@ -240,7 +271,7 @@ race_results.1 %>%
   theme_gray() +
   scale_x_continuous(breaks = 1:10) +
   theme(legend.position = "none")
-ggsave("./src/png/rmse_rsq_autoplot.png", width = 6, height = 3)
+ggsave(glue("./src/png/rmse_rsq_autoplot_{data_type}.png"), width = 6, height = 3)
 
 
 # Obs/pred plots for best configs
@@ -401,19 +432,42 @@ mets_train <-
 #   facet_wrap(~ metric, scales = "free_y") +
 #   theme_gray() 
   
-bind_rows(mets_train, mets_test) %>% 
-  pivot_longer(!c(wflow_id, split), names_to = "metric") %>%
-  ggplot(aes(x = wflow_id, y = value, color = wflow_id, shape = split)) +
+# bind_rows(mets_train, mets_test) %>% 
+#   pivot_longer(!c(wflow_id, split), names_to = "metric") %>%
+#   ggplot(aes(x = wflow_id, y = value, color = split, shape = wflow_id)) +
+#   geom_point(size = 3) +
+#   scale_color_viridis_d(end = .8, option = "C", direction = -1) +  
+#   facet_wrap(~ metric, scales = "free_y") +
+#   ggtitle("Train vs. Test RMSE & RSq", subtitle = glue("Best fit of each model on {data_type} data")) +
+#   theme_gray()
+#   # theme(legend.position = "none")
+# ggsave(glue("./src/png/rmse_rsq_test-vs-train_{data_type}.png"), width = 6, height = 3)
+
+mets_traintest <- 
+  bind_rows(mets_train, mets_test) %>% 
+  mutate(
+    wflow_id = factor(wflow_id, levels = stringr::str_extract(best_fits, "basic_[^_]+"), ordered = TRUE)
+  )
+traintest_rmse <- 
+  bind_rows(mets_train, mets_test) %>% 
+  ggplot(aes(x = reorder(wflow_id, -1* rmse, max), y = rmse, color = split, shape = split)) +
   geom_point(size = 3) +
-  scale_color_viridis_d(end = .6, option = "C") +  
-  facet_wrap(~ metric, scales = "free_y") +  
-  ggtitle("Train vs. Test RMSE & RSq", subtitle = "Best fit of each model") +
+  scale_color_viridis_d(end = .8, option = "C", direction = -1) +  
+  coord_flip() +
+  xlab("") +
+  ggtitle("Train vs. Test: RMSE & RSq", subtitle = glue("Best fit of each model on {data_type} data")) +
   theme_gray()
-  # theme(legend.position = "none")
-ggsave("./src/png/rmse_rsq_test-vs-train.png", width = 6, height = 3)
-
-  
-
+traintest_rsq <- 
+  bind_rows(mets_train, mets_test) %>% 
+  ggplot(aes(x = reorder(wflow_id, rsq, max), y = rsq, color = split, shape = split)) +
+  geom_point(size = 3) +
+  scale_color_viridis_d(end = .8, option = "C", direction = -1) +  
+  coord_flip() +
+  xlab("") +
+  theme_gray() +
+  theme(legend.position = "none")
+(traintest_rmse / traintest_rsq)
+ggsave(glue("./src/png/rmse_rsq_test-vs-train_{data_type}.png"), width = 6, height = 4)
 
 
 
