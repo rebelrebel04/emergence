@@ -5,6 +5,7 @@ library(finetune)
 library(corrr)
 library(patchwork)
 requireNamespace("lme4")
+requireNamespace("glmnet")
 requireNamespace("xgboost")
 requireNamespace("nnet")
 requireNamespace("kernlab")
@@ -22,7 +23,8 @@ d.1 <-
     # C = rnorm(n_obs),
     # D = rnorm(n_obs),
     epsilon = rnorm(n_obs),
-    y = 1*A + 3*B + 6*epsilon
+    y = 2*A + 3*B + 2*epsilon
+    # y = 1*A + 3*B + 6*epsilon
     # y = 1*A + 3*B + 2*A*B + 6*epsilon 
   )
 data_type <- "linear mechanism"
@@ -129,29 +131,38 @@ interact_rec <-
 
 
 # PARSNIP MODELS ####
+null_spec <- 
+  null_model() %>% 
+  set_engine("parsnip") %>% 
+  set_mode("regression")
+
 boost_tree_xgboost_spec <-
   boost_tree(tree_depth = tune(), trees = tune(), learn_rate = tune(), min_n = tune(), loss_reduction = tune(), sample_size = tune(), stop_iter = tune()) %>%
-  set_engine('xgboost') %>%
-  set_mode('regression')
+  set_engine("xgboost") %>%
+  set_mode("regression")
 
 linear_reg_lm_spec <-
   linear_reg() %>%
-  set_engine('lm')
+  set_engine("lm")
+
+linear_reg_glmnet_spec <-
+  linear_reg(penalty = tune(), mixture = tune()) %>%
+  set_engine("glmnet")
 
 rand_forest_ranger_spec <-
   rand_forest(mtry = tune(), min_n = tune()) %>%
-  set_engine('ranger') %>%
-  set_mode('regression')
+  set_engine("ranger") %>%
+  set_mode("regression")
 
 mlp_nnet_spec <-
   mlp(hidden_units = tune(), penalty = tune(), epochs = tune()) %>%
-  set_engine('nnet') %>%
-  set_mode('regression')
+  set_engine("nnet") %>%
+  set_mode("regression")
 
 svm_rbf_kernlab_spec <-
   svm_rbf(cost = tune(), rbf_sigma = tune(), margin = tune()) %>%
-  set_engine('kernlab') %>%
-  set_mode('regression')
+  set_engine("kernlab") %>%
+  set_mode("regression")
 
 
 
@@ -166,11 +177,13 @@ wfs <-
       ),
     models = 
       list(
+        # null = null_spec,
         lm = linear_reg_lm_spec, 
-        rf = rand_forest_ranger_spec, 
-        xgb = boost_tree_xgboost_spec,
+        # glmnet = linear_reg_glmnet_spec,
         mlp = mlp_nnet_spec,
-        svm = svm_rbf_kernlab_spec
+        svm = svm_rbf_kernlab_spec,
+        rf = rand_forest_ranger_spec, 
+        xgb = boost_tree_xgboost_spec
       )
   )
 wfs
@@ -215,37 +228,6 @@ full_results_time <-
       )
   )
 full_results_time
-
-# keep_pred <- 
-#   control_grid(
-#     save_pred = TRUE,
-#     parallel_over = NULL
-#   )
-# 
-# tune_results <- 
-#   wfs %>% 
-#   workflow_map(
-#     "tune_grid", 
-#     # Options to `workflow_map()`: 
-#     grid = 5, seed = 1101, verbose = TRUE,
-#     # Options to `tune_grid()`: 
-#     resamples = folds, metrics = metric_set(rmse, rsq), control = keep_pred,
-#   )
-# 
-# tune_results
-# autoplot(tune_results)
-# 
-# tune_results$result %>% 
-#   map_df(show_best, metric = "rsq", n = 1) %>% 
-#   View()
-#   #map(collect_metrics, metric = "rsq")
-# 
-# tune_results %>% 
-#   workflow_map(select_best)
-#   map(select_best, metric = "rsq", n = 1) 
-#   autoplot()
-#   #map(collect_metrics, metric = "rsq")
-
 
 
 
@@ -405,6 +387,7 @@ best_algos_test_results <-
       last_fit(split = splits)
   )
 best_algos_test_results
+
 
 # These are the performance metrics for holdout data alone
 best_algos_test_results %>% map(collect_metrics)
